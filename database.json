@@ -1,0 +1,17 @@
+{
+  "holders": [],
+  "analytics": {
+    "card_generations": [
+      {
+        "card_id": "379a7f2d",
+        "timestamp": "2026-05-14T19:36:20.847467",
+        "template": "student"
+      },
+      {
+        "card_id": "379a7f2d",
+        "timestamp": "2026-05-14T19:36:21.918475",
+        "template": "student"
+      }
+    ]
+  }
+}

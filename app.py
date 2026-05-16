@@ -11,18 +11,48 @@ import io
 import traceback
 from collections import defaultdict, Counter
 
-app = Flask(__name__)
+# ============ VERCEL FIXES - MUST BE FIRST ============
+# Get the absolute path of the current directory
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Create Flask app
+app = Flask(__name__, 
+            static_folder=os.path.join(BASE_DIR, 'static'),
+            template_folder=os.path.join(BASE_DIR, 'templates'))
 CORS(app)
 
-# Configuration
-app.config['UPLOAD_FOLDER'] = 'static/uploads'
-app.config['GENERATED_FOLDER'] = 'generated_cards'
-app.config['SIGNATURE_FOLDER'] = 'static/signatures'
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-os.makedirs(app.config['GENERATED_FOLDER'], exist_ok=True)
-os.makedirs(app.config['SIGNATURE_FOLDER'], exist_ok=True)
+# Configuration for Vercel - Use /tmp for writable storage
+# Vercel only allows writes to /tmp directory
+app.config['UPLOAD_FOLDER'] = os.path.join('/tmp', 'uploads')
+app.config['GENERATED_FOLDER'] = os.path.join('/tmp', 'generated_cards')
+app.config['SIGNATURE_FOLDER'] = os.path.join('/tmp', 'signatures')
+DB_FILE = os.path.join('/tmp', 'database.json')
 
-DB_FILE = 'database.json'
+# Also create local directories for development
+LOCAL_UPLOAD_FOLDER = os.path.join(BASE_DIR, 'static/uploads')
+LOCAL_GENERATED_FOLDER = os.path.join(BASE_DIR, 'generated_cards')
+LOCAL_SIGNATURE_FOLDER = os.path.join(BASE_DIR, 'static/signatures')
+LOCAL_DB_FILE = os.path.join(BASE_DIR, 'database.json')
+
+# Determine if running on Vercel or locally
+IS_VERCEL = os.environ.get('VERCEL', False) or '/tmp' in DB_FILE
+
+# Use appropriate paths
+if IS_VERCEL:
+    UPLOAD_FOLDER = app.config['UPLOAD_FOLDER']
+    GENERATED_FOLDER = app.config['GENERATED_FOLDER']
+    SIGNATURE_FOLDER = app.config['SIGNATURE_FOLDER']
+    DB_FILE_PATH = DB_FILE
+else:
+    UPLOAD_FOLDER = LOCAL_UPLOAD_FOLDER
+    GENERATED_FOLDER = LOCAL_GENERATED_FOLDER
+    SIGNATURE_FOLDER = LOCAL_SIGNATURE_FOLDER
+    DB_FILE_PATH = LOCAL_DB_FILE
+
+# Create directories
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(GENERATED_FOLDER, exist_ok=True)
+os.makedirs(SIGNATURE_FOLDER, exist_ok=True)
 
 # Template configurations
 TEMPLATES = {
@@ -74,14 +104,14 @@ TEMPLATES = {
 
 def init_db():
     """Initialize JSON database"""
-    if not os.path.exists(DB_FILE):
-        with open(DB_FILE, 'w') as f:
+    if not os.path.exists(DB_FILE_PATH):
+        with open(DB_FILE_PATH, 'w') as f:
             json.dump({
                 'holders': [],
                 'settings': {
                     'default_signature': None,
-                    'company_name': 'SmartID Corporation',
-                    'company_address': '123 Business Ave, Tech City'
+                    'company_name': 'ID Swift Corporation',
+                    'company_address': 'Tech Hub, Silicon Valley'
                 },
                 'analytics': {
                     'card_generations': [],
@@ -91,14 +121,16 @@ def init_db():
 
 def load_db():
     try:
-        with open(DB_FILE, 'r') as f:
+        with open(DB_FILE_PATH, 'r') as f:
             return json.load(f)
     except:
         return {'holders': [], 'settings': {}, 'analytics': {}}
 
 def save_db(data):
-    with open(DB_FILE, 'w') as f:
+    with open(DB_FILE_PATH, 'w') as f:
         json.dump(data, f, indent=2)
+
+# ============ ROUTES ============
 
 @app.route('/')
 def index():
@@ -153,9 +185,143 @@ def add_holder():
         print("Error:", traceback.format_exc())
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/holders/<holder_id>', methods=['DELETE'])
+def delete_holder(holder_id):
+    try:
+        db = load_db()
+        db['holders'] = [h for h in db['holders'] if h['id'] != holder_id]
+        save_db(db)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/upload-photo', methods=['POST'])
+def upload_photo():
+    try:
+        if 'photo' not in request.files:
+            return jsonify({'error': 'No photo uploaded'}), 400
+        
+        file = request.files['photo']
+        if file.filename == '':
+            return jsonify({'error': 'Empty filename'}), 400
+        
+        # Generate unique filename
+        ext = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else 'jpg'
+        filename = f"{uuid.uuid4()}.{ext}"
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        
+        # Process image
+        img = Image.open(file)
+        
+        # Create square crop (1:1 aspect ratio)
+        min_dim = min(img.size)
+        left = (img.width - min_dim) / 2
+        top = (img.height - min_dim) / 2
+        img_cropped = img.crop((left, top, left + min_dim, top + min_dim))
+        
+        # Resize to 300x300
+        img_resized = img_cropped.resize((300, 300), Image.Resampling.LANCZOS)
+        img_resized.save(filepath, quality=85)
+        
+        # Return relative path
+        if IS_VERCEL:
+            return jsonify({'photo_url': f'/api/static/uploads/{filename}'})
+        else:
+            return jsonify({'photo_url': f'/static/uploads/{filename}'})
+    except Exception as e:
+        print("Error uploading photo:", traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/upload-signature', methods=['POST'])
+def upload_signature():
+    try:
+        if 'signature' not in request.files:
+            return jsonify({'error': 'No signature uploaded'}), 400
+        
+        file = request.files['signature']
+        if file.filename == '':
+            return jsonify({'error': 'Empty filename'}), 400
+        
+        # Generate unique filename
+        ext = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else 'png'
+        filename = f"sig_{uuid.uuid4()}.{ext}"
+        filepath = os.path.join(SIGNATURE_FOLDER, filename)
+        
+        # Process signature image (keep transparency)
+        img = Image.open(file)
+        
+        # Convert to RGBA if not already
+        if img.mode != 'RGBA':
+            img = img.convert('RGBA')
+        
+        # Resize signature to appropriate size (200x80 max)
+        img.thumbnail((200, 80), Image.Resampling.LANCZOS)
+        img.save(filepath, 'PNG')
+        
+        if IS_VERCEL:
+            return jsonify({'signature_url': f'/api/static/signatures/{filename}'})
+        else:
+            return jsonify({'signature_url': f'/static/signatures/{filename}'})
+    except Exception as e:
+        print("Error uploading signature:", traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/settings', methods=['GET'])
+def get_settings():
+    try:
+        db = load_db()
+        return jsonify(db.get('settings', {}))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/settings', methods=['POST'])
+def update_settings():
+    try:
+        data = request.get_json()
+        db = load_db()
+        db['settings'] = data
+        save_db(db)
+        return jsonify({'success': True, 'settings': data})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/upload-default-signature', methods=['POST'])
+def upload_default_signature():
+    try:
+        if 'signature' not in request.files:
+            return jsonify({'error': 'No signature uploaded'}), 400
+        
+        file = request.files['signature']
+        if file.filename == '':
+            return jsonify({'error': 'Empty filename'}), 400
+        
+        filename = f"default_signature.png"
+        filepath = os.path.join(SIGNATURE_FOLDER, filename)
+        
+        # Process signature image
+        img = Image.open(file)
+        if img.mode != 'RGBA':
+            img = img.convert('RGBA')
+        img.thumbnail((200, 80), Image.Resampling.LANCZOS)
+        img.save(filepath, 'PNG')
+        
+        # Update settings
+        db = load_db()
+        if IS_VERCEL:
+            db['settings']['default_signature'] = f'/api/static/signatures/{filename}'
+        else:
+            db['settings']['default_signature'] = f'/static/signatures/{filename}'
+        save_db(db)
+        
+        if IS_VERCEL:
+            return jsonify({'success': True, 'signature_url': f'/api/static/signatures/{filename}'})
+        else:
+            return jsonify({'success': True, 'signature_url': f'/static/signatures/{filename}'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/analytics/dashboard', methods=['GET'])
 def get_dashboard_analytics():
-    """Get comprehensive dashboard analytics"""
     try:
         db = load_db()
         holders = db['holders']
@@ -203,21 +369,7 @@ def get_dashboard_analytics():
         blood_group_counts = Counter([h.get('blood_group', 'Not Specified') for h in holders])
         blood_group_distribution = [{'group': bg, 'count': blood_group_counts.get(bg, 0)} for bg in blood_groups if blood_group_counts.get(bg, 0) > 0]
         
-        # 5. Valid Till Status (Expiring Soon)
-        expiring_soon = 0
-        expired = 0
-        permanent = 0
-        
-        for holder in holders:
-            valid_till = holder.get('valid_till', '')
-            if valid_till.lower() == 'permanent':
-                permanent += 1
-            elif valid_till:
-                # Simple expiry check (can be enhanced)
-                if '2024' in valid_till or '2025' in valid_till:
-                    expiring_soon += 1
-        
-        # 6. Recent Activity (Last 10 created cards)
+        # 5. Recent Activity (Last 10 created cards)
         recent_cards = sorted(holders, key=lambda x: x.get('created_at', ''), reverse=True)[:10]
         recent_activity = []
         for card in recent_cards:
@@ -228,7 +380,7 @@ def get_dashboard_analytics():
                 'date': card.get('created_at', '')[:10] if card.get('created_at') else 'Unknown'
             })
         
-        # 7. Template Popularity Trend
+        # 6. Template Trend
         template_trend = []
         for template_id, template_info in TEMPLATES.items():
             count = template_counts.get(template_id, 0)
@@ -240,17 +392,11 @@ def get_dashboard_analytics():
                 'color': template_info['primary_color']
             })
         
-        # 8. Department Performance
-        top_departments = sorted(department_distribution, key=lambda x: x['count'], reverse=True)[:5]
-        
         analytics_data = {
             'summary': {
                 'total_cards': len(holders),
                 'total_departments': len(dept_counts),
                 'total_templates': len(TEMPLATES),
-                'expiring_soon': expiring_soon,
-                'expired': expired,
-                'permanent': permanent,
                 'active_rate': round((len(holders) / max(1, len(holders))) * 100, 1)
             },
             'charts': {
@@ -258,198 +404,19 @@ def get_dashboard_analytics():
                 'template_usage': template_usage,
                 'monthly_creation': last_6_months,
                 'blood_group_distribution': blood_group_distribution,
-                'template_trend': template_trend,
-                'top_departments': top_departments
+                'template_trend': template_trend
             },
             'recent_activity': recent_activity,
             'growth_metrics': {
                 'this_month': monthly_data.get(today.strftime('%b %Y'), 0),
                 'last_month': monthly_data.get((today - timedelta(days=30)).strftime('%b %Y'), 0),
-                'growth_percentage': calculate_growth(monthly_data, today)
+                'growth_percentage': 0
             }
         }
         
         return jsonify(analytics_data)
     except Exception as e:
         print("Analytics error:", traceback.format_exc())
-        return jsonify({'error': str(e)}), 500
-
-def calculate_growth(monthly_data, today):
-    """Calculate month-over-month growth"""
-    this_month = monthly_data.get(today.strftime('%b %Y'), 0)
-    last_month = monthly_data.get((today - timedelta(days=30)).strftime('%b %Y'), 0)
-    if last_month == 0:
-        return 100 if this_month > 0 else 0
-    return round(((this_month - last_month) / last_month) * 100, 1)
-
-@app.route('/api/analytics/department/<dept_name>', methods=['GET'])
-def get_department_analytics(dept_name):
-    """Get detailed analytics for a specific department"""
-    try:
-        db = load_db()
-        holders = [h for h in db['holders'] if h.get('department') == dept_name]
-        
-        # Department-specific analytics
-        template_usage = Counter([h.get('template', 'corporate') for h in holders])
-        blood_groups = Counter([h.get('blood_group', 'Not Specified') for h in holders])
-        
-        return jsonify({
-            'department': dept_name,
-            'total_members': len(holders),
-            'template_breakdown': dict(template_usage),
-            'blood_group_breakdown': dict(blood_groups),
-            'members': holders
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/analytics/export-report', methods=['GET'])
-def export_analytics_report():
-    """Export analytics as CSV report"""
-    try:
-        db = load_db()
-        holders = db['holders']
-        
-        output = io.StringIO()
-        writer = csv.writer(output)
-        
-        # Summary Report
-        writer.writerow(['=== ID CARD MANAGEMENT SYSTEM REPORT ==='])
-        writer.writerow([f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'])
-        writer.writerow([])
-        
-        writer.writerow(['=== SUMMARY STATISTICS ==='])
-        writer.writerow(['Total ID Cards', len(holders)])
-        writer.writerow(['Total Departments', len(set([h.get('department') for h in holders if h.get('department')]))])
-        writer.writerow([])
-        
-        writer.writerow(['=== DEPARTMENT WISE BREAKDOWN ==='])
-        dept_counts = Counter([h.get('department', 'Unassigned') for h in holders])
-        for dept, count in dept_counts.items():
-            writer.writerow([dept, count])
-        writer.writerow([])
-        
-        writer.writerow(['=== TEMPLATE USAGE ==='])
-        template_counts = Counter([h.get('template', 'corporate') for h in holders])
-        for template, count in template_counts.items():
-            writer.writerow([TEMPLATES.get(template, {}).get('name', template), count])
-        
-        output.seek(0)
-        return send_file(
-            io.BytesIO(output.getvalue().encode('utf-8')),
-            mimetype='text/csv',
-            as_attachment=True,
-            download_name=f'analytics_report_{datetime.now().strftime("%Y%m%d")}.csv'
-        )
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/holders/<holder_id>', methods=['DELETE'])
-def delete_holder(holder_id):
-    try:
-        db = load_db()
-        db['holders'] = [h for h in db['holders'] if h['id'] != holder_id]
-        save_db(db)
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/upload-photo', methods=['POST'])
-def upload_photo():
-    try:
-        if 'photo' not in request.files:
-            return jsonify({'error': 'No photo uploaded'}), 400
-        
-        file = request.files['photo']
-        if file.filename == '':
-            return jsonify({'error': 'Empty filename'}), 400
-        
-        ext = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else 'jpg'
-        filename = f"{uuid.uuid4()}.{ext}"
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        
-        img = Image.open(file)
-        min_dim = min(img.size)
-        left = (img.width - min_dim) / 2
-        top = (img.height - min_dim) / 2
-        img_cropped = img.crop((left, top, left + min_dim, top + min_dim))
-        img_resized = img_cropped.resize((300, 300), Image.Resampling.LANCZOS)
-        img_resized.save(filepath, quality=85)
-        
-        return jsonify({'photo_url': f'/static/uploads/{filename}'})
-    except Exception as e:
-        print("Error uploading photo:", traceback.format_exc())
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/upload-signature', methods=['POST'])
-def upload_signature():
-    try:
-        if 'signature' not in request.files:
-            return jsonify({'error': 'No signature uploaded'}), 400
-        
-        file = request.files['signature']
-        if file.filename == '':
-            return jsonify({'error': 'Empty filename'}), 400
-        
-        ext = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else 'png'
-        filename = f"sig_{uuid.uuid4()}.{ext}"
-        filepath = os.path.join(app.config['SIGNATURE_FOLDER'], filename)
-        
-        img = Image.open(file)
-        if img.mode != 'RGBA':
-            img = img.convert('RGBA')
-        img.thumbnail((200, 80), Image.Resampling.LANCZOS)
-        img.save(filepath, 'PNG')
-        
-        return jsonify({'signature_url': f'/static/signatures/{filename}'})
-    except Exception as e:
-        print("Error uploading signature:", traceback.format_exc())
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/settings', methods=['GET'])
-def get_settings():
-    try:
-        db = load_db()
-        return jsonify(db.get('settings', {}))
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/settings', methods=['POST'])
-def update_settings():
-    try:
-        data = request.get_json()
-        db = load_db()
-        db['settings'] = data
-        save_db(db)
-        return jsonify({'success': True, 'settings': data})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/upload-default-signature', methods=['POST'])
-def upload_default_signature():
-    try:
-        if 'signature' not in request.files:
-            return jsonify({'error': 'No signature uploaded'}), 400
-        
-        file = request.files['signature']
-        if file.filename == '':
-            return jsonify({'error': 'Empty filename'}), 400
-        
-        filename = f"default_signature.png"
-        filepath = os.path.join(app.config['SIGNATURE_FOLDER'], filename)
-        
-        img = Image.open(file)
-        if img.mode != 'RGBA':
-            img = img.convert('RGBA')
-        img.thumbnail((200, 80), Image.Resampling.LANCZOS)
-        img.save(filepath, 'PNG')
-        
-        db = load_db()
-        db['settings']['default_signature'] = f'/static/signatures/{filename}'
-        save_db(db)
-        
-        return jsonify({'success': True, 'signature_url': f'/static/signatures/{filename}'})
-    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/generate-card/<holder_id>', methods=['GET'])
@@ -461,28 +428,24 @@ def generate_card(holder_id):
         if not holder:
             return jsonify({'error': 'Holder not found'}), 404
         
-        # Log card generation for analytics
-        if 'analytics' not in db:
-            db['analytics'] = {'card_generations': []}
-        db['analytics']['card_generations'].append({
-            'card_id': holder_id,
-            'timestamp': datetime.now().isoformat(),
-            'template': holder.get('template', 'corporate')
-        })
-        save_db(db)
-        
         template = TEMPLATES.get(holder.get('template', 'corporate'), TEMPLATES['corporate'])
         
+        # Create ID Card (600x400 pixels)
         card_width = 600
         card_height = 400
         
+        # Create card background with gradient effect
         img = Image.new('RGB', (card_width, card_height), color=template['primary_color'])
         draw = ImageDraw.Draw(img)
         
+        # Add gradient-like stripes
         draw.rectangle([(0, 0), (card_width, 80)], fill=template['secondary_color'])
         draw.rectangle([(0, 320), (card_width, card_height)], fill=template['primary_color'])
+        
+        # Add accent stripe
         draw.rectangle([(0, 80), (10, 320)], fill=template['accent_color'])
         
+        # Use default font
         try:
             font_title = ImageFont.truetype("arial.ttf", 24)
             font_normal = ImageFont.truetype("arial.ttf", 16)
@@ -492,8 +455,10 @@ def generate_card(holder_id):
             font_normal = ImageFont.load_default()
             font_small = ImageFont.load_default()
         
+        # Title
         draw.text((card_width//2, 15), template['name'].upper() + " ID CARD", fill=template['text_color'], anchor='mt', font=font_title)
         
+        # Add photo if exists
         if holder.get('photo') and holder['photo']:
             try:
                 photo_path = holder['photo'].replace('/static/', 'static/')
@@ -513,6 +478,7 @@ def generate_card(holder_id):
             draw.rectangle([(40, 100), (160, 220)], fill='#475569', outline=template['accent_color'], width=2)
             draw.text((100, 160), "NO PHOTO", fill=template['text_color'], anchor='mm', font=font_small)
         
+        # Draw details
         start_x = 200
         start_y = 110
         line_height = 30
@@ -535,6 +501,7 @@ def generate_card(holder_id):
             draw.text((start_x, y), f"{label}:", fill=template['label_color'], font=font_small)
             draw.text((start_x + 120, y), str(value), fill=template['text_color'], font=font_normal)
         
+        # Add QR Code
         qr_data = f"ID:{holder.get('employee_id', 'N/A')}|Name:{holder.get('full_name', 'N/A')}|Dept:{holder.get('department', 'N/A')}|Valid Till:{valid_till}"
         qr = qrcode.QRCode(box_size=3, border=1)
         qr.add_data(qr_data)
@@ -543,12 +510,16 @@ def generate_card(holder_id):
         qr_img = qr_img.resize((80, 80))
         img.paste(qr_img, (card_width - 110, card_height - 100))
         
+        # Add Signature
         signature_added = False
+        
+        # Check for custom signature
         if holder.get('signature') and holder['signature']:
             try:
-                sig_path = holder['signature'].replace('/static/', 'static/')
-                if os.path.exists(sig_path):
-                    signature_img = Image.open(sig_path)
+                sig_path = holder['signature'].replace('/api/static/', '').replace('/static/', '')
+                full_sig_path = os.path.join(SIGNATURE_FOLDER, os.path.basename(sig_path))
+                if os.path.exists(full_sig_path):
+                    signature_img = Image.open(full_sig_path)
                     if signature_img.mode != 'RGBA':
                         signature_img = signature_img.convert('RGBA')
                     signature_img.thumbnail((150, 60), Image.Resampling.LANCZOS)
@@ -557,14 +528,16 @@ def generate_card(holder_id):
             except Exception as e:
                 print(f"Error adding custom signature: {e}")
         
+        # If no custom signature, try default signature
         if not signature_added and holder.get('use_default_signature', False):
             db_settings = load_db()
             default_sig = db_settings.get('settings', {}).get('default_signature')
             if default_sig:
                 try:
-                    sig_path = default_sig.replace('/static/', 'static/')
-                    if os.path.exists(sig_path):
-                        signature_img = Image.open(sig_path)
+                    sig_path = default_sig.replace('/api/static/', '').replace('/static/', '')
+                    full_sig_path = os.path.join(SIGNATURE_FOLDER, os.path.basename(sig_path))
+                    if os.path.exists(full_sig_path):
+                        signature_img = Image.open(full_sig_path)
                         if signature_img.mode != 'RGBA':
                             signature_img = signature_img.convert('RGBA')
                         signature_img.thumbnail((150, 60), Image.Resampling.LANCZOS)
@@ -573,12 +546,14 @@ def generate_card(holder_id):
                 except Exception as e:
                     print(f"Error adding default signature: {e}")
         
+        # If no signature, draw signature line
         if not signature_added:
             draw.line([(start_x, card_height - 40), (start_x + 150, card_height - 40)], fill=template['accent_color'], width=2)
             draw.text((start_x + 75, card_height - 35), "AUTHORIZED SIGNATURE", fill=template['label_color'], anchor='mt', font=font_small)
         
+        # Save card
         card_filename = f"card_{holder_id}.png"
-        card_path = os.path.join(app.config['GENERATED_FOLDER'], card_filename)
+        card_path = os.path.join(GENERATED_FOLDER, card_filename)
         img.save(card_path)
         
         return send_file(card_path, mimetype='image/png')
@@ -634,8 +609,10 @@ def export_csv():
         output = io.StringIO()
         writer = csv.writer(output)
         
+        # Write headers
         writer.writerow(['Full Name', 'Employee ID', 'Department', 'Designation', 'Email', 'Phone', 'Blood Group', 'Valid Till', 'Template', 'Has Signature', 'Created Date'])
         
+        # Write data
         for holder in holders:
             writer.writerow([
                 holder.get('full_name', ''),
@@ -661,6 +638,54 @@ def export_csv():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/analytics/export-report', methods=['GET'])
+def export_analytics_report():
+    try:
+        db = load_db()
+        holders = db['holders']
+        
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Summary Report
+        writer.writerow(['=== ID SWIFT ANALYTICS REPORT ==='])
+        writer.writerow([f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'])
+        writer.writerow([])
+        
+        writer.writerow(['=== SUMMARY STATISTICS ==='])
+        writer.writerow(['Total ID Cards', len(holders)])
+        writer.writerow(['Total Departments', len(set([h.get('department') for h in holders if h.get('department')]))])
+        writer.writerow([])
+        
+        writer.writerow(['=== DEPARTMENT WISE BREAKDOWN ==='])
+        dept_counts = Counter([h.get('department', 'Unassigned') for h in holders])
+        for dept, count in dept_counts.items():
+            writer.writerow([dept, count])
+        writer.writerow([])
+        
+        writer.writerow(['=== TEMPLATE USAGE ==='])
+        template_counts = Counter([h.get('template', 'corporate') for h in holders])
+        for template, count in template_counts.items():
+            writer.writerow([TEMPLATES.get(template, {}).get('name', template), count])
+        
+        output.seek(0)
+        return send_file(
+            io.BytesIO(output.getvalue().encode('utf-8')),
+            mimetype='text/csv',
+            as_attachment=True,
+            download_name=f'id_swift_report_{datetime.now().strftime("%Y%m%d")}.csv'
+        )
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# ============ SERVER INITIALIZATION ============
+
+# Initialize database on startup
+init_db()
+
+# For Vercel, we need to export 'app'
+# This is already done above with app = Flask(...)
+
 if __name__ == '__main__':
-    init_db()
-    app.run(debug=True, port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(debug=False, host='0.0.0.0', port=port)

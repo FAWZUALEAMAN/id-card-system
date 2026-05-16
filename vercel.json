@@ -24,8 +24,15 @@
       "dest": "/templates/$1"
     },
     {
+      "src": "/api/static/(.*)",
+      "dest": "/static/$1"
+    },
+    {
       "src": "/(.*)",
       "dest": "app.py"
     }
-  ]
+  ],
+  "env": {
+    "VERCEL": "true"
+  }
 }
